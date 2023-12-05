@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 func IsDigit(s string) bool {
@@ -26,71 +27,126 @@ func IsLetter(s string) bool {
 	return true
 }
 
-func matchLine(line string, pattern string, matchStart bool) (bool, error) {
-	if len(pattern) == 0 {
+func matchLineHere(line []byte, pattern string) (bool, error) {
+	switch {
+	case strings.HasPrefix(pattern, `$`) && len(pattern) == 1:
+		count := utf8.RuneCount(line)
+		return count == 0, nil
+	case len(pattern) == 0:
+		return true, nil
+	case pattern == `$`:
+		return len(line) == 0, nil
+	case len(pattern) > 1 && pattern[1] == '?':
+		return matchZeroOrOne(pattern[0], line, pattern)
+	case len(line) == 0:
+		return false, nil
+	case len(pattern) > 1 && pattern[1] == '+':
+		return matchOneOrMore(pattern[0], line, pattern)
+
+	case strings.HasPrefix(pattern, "\\w"):
+		char, size := utf8.DecodeRune(line)
+		if !unicode.IsLetter(char) && !unicode.IsDigit(char) {
+			return false, nil
+		}
+		return matchLineHere(line[size:], pattern[2:])
+
+	case strings.HasPrefix(pattern, "."):
+		_, size := utf8.DecodeRune(line)
+		return matchLineHere(line[size:], pattern[1:])
+
+	case strings.HasPrefix(pattern, "\\d"):
+		char, size := utf8.DecodeRune(line)
+		if !unicode.IsDigit((char)) {
+			return false, nil
+		}
+		return matchLineHere(line[size:], pattern[2:])
+
+	case strings.HasPrefix(pattern, "("):
+		end := strings.IndexByte(pattern, ')')
+		middle := strings.IndexByte(pattern, '|')
+		first := pattern[1:middle]
+		second := pattern[middle+1 : end]
+		result, _ := matchLineHere(line, first+pattern[end+1:])
+		if result {
+			return true, nil
+		}
+		return matchLineHere(line, second+pattern[end+1:])
+
+	case strings.HasPrefix(pattern, "[^"):
+		end := strings.IndexByte(pattern, ']')
+		charset := pattern[2:end]
+		char, size := utf8.DecodeRune(line)
+		if strings.ContainsRune(charset, char) {
+			return false, nil
+		}
+		return matchLineHere(line[size:], pattern[end+1:])
+
+	case strings.HasPrefix(pattern, "["):
+		end := strings.IndexByte(pattern, ']')
+		charset := pattern[1:end]
+		char, size := utf8.DecodeRune(line)
+		if !strings.ContainsRune(charset, char) {
+			return false, nil
+		}
+		return matchLineHere(line[size:], pattern[end+1:])
+	}
+
+	patternChar, patternCharSize := utf8.DecodeRuneInString(pattern)
+	if patternChar == utf8.RuneError {
+		return false, fmt.Errorf("bad pattern")
+	}
+
+	char, size := utf8.DecodeRune(line)
+	if char != patternChar {
+		return false, nil
+	}
+	return matchLineHere(line[size:], pattern[patternCharSize:])
+}
+
+func matchLine(line []byte, pattern string) (bool, error) {
+	if pattern == "" {
 		return true, nil
 	}
 	if len(line) == 0 {
 		return len(pattern) == 0, nil
 	}
 	if strings.HasPrefix(pattern, "^") {
-		return matchLine(line, pattern[1:], true)
+		return matchLineHere(line, pattern[1:])
 	}
-	if strings.HasPrefix(pattern, "[") {
-		end := strings.IndexByte(pattern, ']')
-		charset := pattern[1:end]
-		if charset[0] == '^' {
-			for _, c := range charset {
-				if strings.HasPrefix(line, string(c)) {
-					return false, nil
-				}
-			}
-			return matchLine(line[1:], pattern[end+1:], matchStart)
-		} else {
-			for _, c := range charset {
-				if strings.HasPrefix(line, string(c)) {
-					result, _ := matchLine(line[1:], pattern[end+1:], true)
-					if result {
-						return true, nil
-					}
-				}
-			}
+	for i := range string(line) {
+		ok, err := matchLineHere(line[i:], pattern)
+		if err != nil {
+			return false, err
 		}
-		return false, nil
+		if ok {
+			return true, nil
+		}
 	}
+	return false, nil
+}
 
-	char := string(line[0])
-	if strings.HasPrefix(pattern, "\\w") {
-		if IsLetter(char) || IsDigit(char) {
-			return matchLine(line[1:], pattern[2:], matchStart)
-		} else {
-			if matchStart {
-				return false, nil
-			} else {
-				return matchLine(line[1:], pattern, matchStart)
-			}
+func matchOneOrMore(char byte, line []byte, pattern string) (bool, error) {
+	for i := 0; i < len(line); i++ {
+		if char != line[i] {
+			break
 		}
-	} else if strings.HasPrefix(pattern, "\\d") {
-		if IsDigit(char) {
-			return matchLine(line[1:], pattern[2:], matchStart)
-		} else {
-			if matchStart {
-				return false, nil
-			} else {
-				return matchLine(line[1:], pattern, matchStart)
-			}
+		result, err := matchLine(line[i+1:], pattern[2:])
+		if err != nil {
+			return false, err
 		}
-	} else {
-		if string(pattern[0]) == char {
-			return matchLine(line[1:], pattern[1:], matchStart)
-		} else {
-			if matchStart {
-				return false, nil
-			} else {
-				return matchLine(line[1:], pattern, matchStart)
-			}
+		if result {
+			return true, nil
 		}
 	}
+	return false, nil
+}
+
+func matchZeroOrOne(char byte, line []byte, pattern string) (bool, error) {
+	res, _ := matchLineHere(line, pattern[2:])
+	if res {
+		return true, nil
+	}
+	return matchLineHere(line, string(pattern[0])+pattern[2:])
 }
 
 func main() {
@@ -107,7 +163,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	ok, err := matchLine(string(line), pattern, false)
+	ok, err := matchLine(line, pattern)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
