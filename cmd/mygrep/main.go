@@ -8,6 +8,19 @@ import (
 	"unicode/utf8"
 )
 
+func matchLine(line []byte, pattern string) (bool, error) {
+	if utf8.RuneCountInString(pattern) < 1 {
+		return false, fmt.Errorf("unsupported pattern: %q", pattern)
+	}
+	var ok bool
+	if pattern == "\\d" {
+		ok = bytes.ContainsAny(line, "0123456789")
+	} else {
+		ok = bytes.ContainsAny(line, pattern)
+	}
+	return ok, nil
+}
+
 func main() {
 	if len(os.Args) < 3 || os.Args[1] != "-E" {
 		fmt.Fprintf(os.Stderr, "usage: mygrep -E <pattern>\n")
@@ -31,12 +44,4 @@ func main() {
 	if !ok {
 		os.Exit(1)
 	}
-}
-
-func matchLine(line []byte, pattern string) (bool, error) {
-	if utf8.RuneCountInString(pattern) != 1 {
-		return false, fmt.Errorf("unsupported pattern: %q", pattern)
-	}
-	var ok bool = bytes.ContainsAny(line, pattern)
-	return ok, nil
 }
